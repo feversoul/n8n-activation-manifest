@@ -17,8 +17,8 @@
 //   --json               print the report as JSON
 //   --page-size <n>      workflows per list request (default 100, at most 250)
 //
-// A call whose connection drops before an answer came is tried again, up to
-// three more times.
+// Only reads retry a dropped connection. A write without a response may
+// already have taken effect; it is not retried by the CLI.
 //
 // The API key comes from N8N_API_KEY. Scopes: workflow:list, workflow:activate,
 // workflow:deactivate.
@@ -208,16 +208,17 @@ function parse(argv) {
   return args;
 }
 
-// fetch, tried again when the connection drops before an answer came (n8n
-// closing an idle keep-alive connection, a proxy restart). A timeout or any
-// HTTP answer is not tried again. Publishing or unpublishing twice ends in the
-// same state, so repeating a call whose answer got lost is safe.
+// Reads may recover from a dropped connection. A lost write response does not
+// say whether the server applied it. A repeated publish can restart triggers
+// even when the final published version is unchanged.
 export async function request(url, init = {}, attempts = 4) {
+  const method = (init.method ?? 'GET').toUpperCase();
+  const retryRead = method === 'GET' || method === 'HEAD';
   for (let attempt = 1; ; attempt++) {
     try {
       return await fetch(url, { ...init, signal: AbortSignal.timeout(60_000) });
     } catch (error) {
-      if (error?.name === 'TimeoutError' || error?.name === 'AbortError' || attempt >= attempts) throw error;
+      if (!retryRead || error?.name === 'TimeoutError' || error?.name === 'AbortError' || attempt >= attempts) throw error;
       await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
     }
   }
@@ -293,7 +294,7 @@ export async function apply({ manifest, env, url, apiKey, dryRun = false, stale,
         if (step.action === 'unpublish') unpublished = true;
         results[step.id] = { status: answer.status, message: answer.message };
       } catch (error) {
-        results[step.id] = { status: 0, message: String(error.message ?? error) };
+        results[step.id] = { status: 0, message: `write outcome unknown; not retried. Check the observed state before reapplying (${String(error.message ?? error)})` };
       }
     }
   }

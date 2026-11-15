@@ -654,7 +654,7 @@ test('the apply workflow: token, environment check, dry run by default, apply, n
   assert.match(rowOf(refused.body, NO_TRIGGER).error, /^HTTP 400: .*no trigger node/);
 });
 
-test('a connection that drops before the answer is tried again; an HTTP error is not', async () => {
+test('a dropped read recovers; a dropped publish requires a new apply; an HTTP error is not retried', async () => {
   // A stand-in for the API that closes the first connection of every request
   // without answering, the way an idle keep-alive connection ends.
   const seen = {};
@@ -674,11 +674,20 @@ test('a connection that drops before the answer is tried again; an HTTP error is
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   try {
-    const report = await apply({ manifest: { environments: ['prod'], workflows: { one: { prod: 'active' } } }, env: 'prod', url, apiKey: 'k' });
-    assert.equal(report.ok, true, JSON.stringify(report.rows));
-    assert.equal(report.rows[0].result, 'applied');
-    assert.equal(seen['POST /api/v1/workflows/one/publish'], 2, 'dropped once, sent again once');
+    const options = { manifest: { environments: ['prod'], workflows: { one: { prod: 'active' } } }, env: 'prod', url, apiKey: 'k' };
+    const report = await apply(options);
+    assert.equal(report.ok, false);
+    assert.match(report.rows[0].error, /write outcome unknown; not retried/);
+    assert.equal(report.rows[0].after.active, false);
+    assert.equal(seen['POST /api/v1/workflows/one/publish'], 1, 'one write, no automatic replay');
     assert.ok(seen['GET /api/v1/workflows'] >= 3);
+
+    // We know this stand-in did not apply the first POST. A separate apply
+    // observes the workflow as inactive and can publish it.
+    const reapplied = await apply(options);
+    assert.equal(reapplied.ok, true, JSON.stringify(reapplied.rows));
+    assert.equal(reapplied.rows[0].result, 'applied');
+    assert.equal(seen['POST /api/v1/workflows/one/publish'], 2);
 
     // A 500 is an answer: no second try.
     const failed = await request(`${url}/other`, {}, 4);
